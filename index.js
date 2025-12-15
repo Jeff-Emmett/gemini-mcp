@@ -556,81 +556,85 @@ Be authentic to zine culture - raw, personal, and visually interesting.`;
       const aspectRatio = aspectRatioMap[args.aspect_ratio] || "3:4";
       const numImages = Math.min(Math.max(args.num_images || 1, 1), 4);
 
-      // Use the new Gemini image generation models with generateContent API
-      // Models: gemini-2.5-flash-preview-image-generation (fast), gemini-2.0-flash-exp (fallback)
-      let response;
-      let modelUsed = "gemini-2.0-flash-exp";
-
-      // List of models to try in order of preference (Dec 2025)
-      // See: https://ai.google.dev/gemini-api/docs/image-generation
-      const modelsToTry = [
-        "gemini-2.0-flash-exp-image-generation",  // Explicit image generation variant
-        "gemini-2.0-flash-exp",  // General experimental model with image capability
-        "gemini-2.0-flash-preview-image-generation",
-      ];
-
-      let lastError = null;
-      for (const modelName of modelsToTry) {
-        try {
-          console.error(`Trying image generation with model: ${modelName}`);
-          response = await genAINew.models.generateContent({
-            model: modelName,
-            contents: enhancedPrompt,
-            config: {
-              responseModalities: ["IMAGE", "TEXT"],
-            },
-          });
-          modelUsed = modelName;
-          break; // Success, exit loop
-        } catch (e) {
-          console.error(`${modelName} failed:`, e.message);
-          lastError = e;
-          continue; // Try next model
-        }
-      }
-
-      if (!response) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `All image generation models failed. Last error: ${lastError?.message || "Unknown error"}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-
-      // Extract images from response parts
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
       const savedPaths = [];
       let textResponse = "";
-      let imageIndex = 0;
+      let modelUsed = "";
+      let lastError = null;
 
-      // Handle different response structures
-      const parts = response.candidates?.[0]?.content?.parts || response.parts || [];
+      // Strategy 1: Try Gemini native image generation with generateContent
+      // See: https://ai.google.dev/gemini-api/docs/image-generation
+      const geminiModels = [
+        "gemini-2.0-flash-exp",  // Main experimental model with image capability
+      ];
 
-      for (const part of parts) {
-        if (part.text) {
-          textResponse += part.text + "\n";
-        } else if (part.inlineData) {
-          // New API format: inlineData with data field
-          const buffer = Buffer.from(part.inlineData.data, "base64");
-          const suffix = numImages > 1 ? `_${imageIndex + 1}` : "";
-          const filename = args.filename ? `${args.filename}${suffix}` : `gemini_img_${timestamp}${suffix}`;
-          const outputPath = path.join(OUTPUT_DIR, `${filename}.png`);
-          fs.writeFileSync(outputPath, buffer);
-          savedPaths.push(outputPath);
-          imageIndex++;
-        } else if (part.inline_data) {
-          // Alternative format
-          const buffer = Buffer.from(part.inline_data.data, "base64");
-          const suffix = numImages > 1 ? `_${imageIndex + 1}` : "";
-          const filename = args.filename ? `${args.filename}${suffix}` : `gemini_img_${timestamp}${suffix}`;
-          const outputPath = path.join(OUTPUT_DIR, `${filename}.png`);
-          fs.writeFileSync(outputPath, buffer);
-          savedPaths.push(outputPath);
-          imageIndex++;
+      for (const modelName of geminiModels) {
+        try {
+          console.error(`Trying Gemini generateContent with model: ${modelName}`);
+          const response = await genAINew.models.generateContent({
+            model: modelName,
+            contents: enhancedPrompt,
+            config: {
+              responseModalities: ["Text", "Image"],
+            },
+          });
+          modelUsed = modelName;
+
+          // Extract images from response
+          const parts = response.candidates?.[0]?.content?.parts || response.parts || [];
+          let imageIndex = 0;
+          for (const part of parts) {
+            if (part.text) {
+              textResponse += part.text + "\n";
+            } else if (part.inlineData?.data) {
+              const buffer = Buffer.from(part.inlineData.data, "base64");
+              const suffix = numImages > 1 ? `_${imageIndex + 1}` : "";
+              const filename = args.filename ? `${args.filename}${suffix}` : `gemini_img_${timestamp}${suffix}`;
+              const outputPath = path.join(OUTPUT_DIR, `${filename}.png`);
+              fs.writeFileSync(outputPath, buffer);
+              savedPaths.push(outputPath);
+              imageIndex++;
+            }
+          }
+          if (savedPaths.length > 0) break;
+        } catch (e) {
+          console.error(`Gemini ${modelName} failed:`, e.message);
+          lastError = e;
+        }
+      }
+
+      // Strategy 2: Try Imagen via generateImages API if Gemini failed
+      if (savedPaths.length === 0) {
+        try {
+          console.error("Trying Imagen generateImages API...");
+          const response = await genAINew.models.generateImages({
+            model: "imagen-3.0-generate-002",
+            prompt: enhancedPrompt,
+            config: {
+              numberOfImages: numImages,
+              aspectRatio: aspectRatio,
+            },
+          });
+          modelUsed = "imagen-3.0-generate-002";
+
+          // Extract images from Imagen response
+          const images = response.generatedImages || response.images || [];
+          let imageIndex = 0;
+          for (const img of images) {
+            const imageData = img.image?.imageBytes || img.imageBytes || img.data;
+            if (imageData) {
+              const buffer = Buffer.from(imageData, "base64");
+              const suffix = numImages > 1 ? `_${imageIndex + 1}` : "";
+              const filename = args.filename ? `${args.filename}${suffix}` : `gemini_img_${timestamp}${suffix}`;
+              const outputPath = path.join(OUTPUT_DIR, `${filename}.png`);
+              fs.writeFileSync(outputPath, buffer);
+              savedPaths.push(outputPath);
+              imageIndex++;
+            }
+          }
+        } catch (e) {
+          console.error("Imagen generateImages failed:", e.message);
+          lastError = e;
         }
       }
 
@@ -639,7 +643,7 @@ Be authentic to zine culture - raw, personal, and visually interesting.`;
           content: [
             {
               type: "text",
-              text: `Image generation did not return any images. Response: ${textResponse || JSON.stringify(response).slice(0, 500)}`,
+              text: `Image generation failed. Last error: ${lastError?.message || "Unknown error"}\n\nTried: Gemini generateContent and Imagen generateImages APIs.`,
             },
           ],
           isError: true,

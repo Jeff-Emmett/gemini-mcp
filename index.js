@@ -217,13 +217,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "gemini_generate_image",
-        description: "Generate an image using Google's most advanced Gemini 3 Pro Image model. State-of-the-art quality with 1K/2K/4K output, advanced text rendering, and photorealistic/artistic capabilities.",
+        description: "Generate an image using Google's Nano Banana models (Gemini image generation). Supports Nano Banana Pro (gemini-3-pro-image) for highest quality up to 4K, or Nano Banana (gemini-2.5-flash-image) for fast generation. Advanced text rendering and photorealistic/artistic capabilities.",
         inputSchema: {
           type: "object",
           properties: {
             prompt: {
               type: "string",
               description: "Detailed description of the image to generate",
+            },
+            model: {
+              type: "string",
+              description: "Model to use: 'nano-banana-pro' (highest quality, up to 4K), 'nano-banana' (fast), or 'auto' (tries best available)",
+              default: "auto",
+              enum: ["auto", "nano-banana-pro", "nano-banana"],
             },
             style: {
               type: "string",
@@ -232,8 +238,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             aspect_ratio: {
               type: "string",
-              description: "Aspect ratio: 1:1 (square), 3:4 (portrait), 4:3 (landscape), 9:16 (tall), 16:9 (wide)",
+              description: "Aspect ratio: 1:1 (square), 3:4 (portrait), 4:3 (landscape), 9:16 (tall), 16:9 (wide), 2:3, 3:2, 4:5, 5:4, 21:9 (ultrawide)",
               default: "3:4",
+            },
+            image_size: {
+              type: "string",
+              description: "Output resolution (Nano Banana Pro only): '1K' (~1024px), '2K' (~2048px), '4K' (~4096px). Higher = more detail but slower.",
+              default: "1K",
+              enum: ["1K", "2K", "4K"],
             },
             num_images: {
               type: "number",
@@ -547,14 +559,21 @@ Be authentic to zine culture - raw, personal, and visually interesting.`;
         "landscape": "4:3",
         "tall": "9:16",
         "wide": "16:9",
+        "ultrawide": "21:9",
         "1:1": "1:1",
         "3:4": "3:4",
         "4:3": "4:3",
         "9:16": "9:16",
-        "16:9": "16:9"
+        "16:9": "16:9",
+        "2:3": "2:3",
+        "3:2": "3:2",
+        "4:5": "4:5",
+        "5:4": "5:4",
+        "21:9": "21:9"
       };
       const aspectRatio = aspectRatioMap[args.aspect_ratio] || "3:4";
       const numImages = Math.min(Math.max(args.num_images || 1, 1), 4);
+      const imageSize = args.image_size || "1K";
 
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
       const savedPaths = [];
@@ -562,11 +581,24 @@ Be authentic to zine culture - raw, personal, and visually interesting.`;
       let modelUsed = "";
       let lastError = null;
 
-      // Strategy 1: Try Gemini native image generation with generateContent
-      // See: https://ai.google.dev/gemini-api/docs/image-generation
-      const geminiModels = [
-        "gemini-2.0-flash-exp",  // Main experimental model with image capability
-      ];
+      // Model selection based on user preference
+      // Nano Banana = gemini-2.5-flash-image (fast)
+      // Nano Banana Pro = gemini-3-pro-image-preview (advanced, up to 4K)
+      let geminiModels;
+      const modelPref = args.model || "auto";
+
+      if (modelPref === "nano-banana-pro") {
+        geminiModels = ["gemini-3-pro-image-preview"];
+      } else if (modelPref === "nano-banana") {
+        geminiModels = ["gemini-2.5-flash-image"];
+      } else {
+        // Auto: try best models first, fallback to older
+        geminiModels = [
+          "gemini-3-pro-image-preview",  // Nano Banana Pro - best quality, up to 4K
+          "gemini-2.5-flash-image",      // Nano Banana - fast generation
+          "gemini-2.0-flash-exp",        // Fallback experimental model
+        ];
+      }
 
       for (const modelName of geminiModels) {
         try {
